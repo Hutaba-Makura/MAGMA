@@ -20,6 +20,7 @@ from .trg_memory import TemporalResonanceGraphMemory, Link, LinkType
 from .graph_db import SessionNode, NodeType, LinkSubType
 from .episode_segmenter import EpisodeSegmenter, Episode
 from .temporal_parser import TemporalParser
+from .relation_strategy import create_relation_strategy, relation_statistics
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,10 @@ class MemoryBuilder:
         cache_dir: str,
         llm_model: str = "gpt-4o-mini",
         use_episodes: bool = False,
-        embedding_model: str = "minilm"
+        embedding_model: str = "minilm",
+        relation_mode: str = "original",
+        llm_backend: str = "openai",
+        llm_base_url: Optional[str] = None
     ):
         """
         Initialize memory builder.
@@ -55,23 +59,34 @@ class MemoryBuilder:
         self.llm_model = llm_model
         self.use_episodes = use_episodes
         self.embedding_model = embedding_model
+        self.relation_mode = relation_mode
+        self.llm_backend = llm_backend
+        self.llm_base_url = llm_base_url
 
         self.trg = TemporalResonanceGraphMemory(
-            llm_backend='openai',
+            llm_backend=llm_backend,
             llm_model=llm_model,
+            llm_base_url=llm_base_url,
             enable_async=False,
             persist_dir=str(self.cache_dir),
             embedding_model=embedding_model
         )
 
-        api_key = os.getenv('OPENAI_API_KEY')
         self.llm_controller = None
-        if api_key:
+        if llm_backend == 'local':
+            self.llm_controller = LLMController(
+                backend='local',
+                model=llm_model,
+                base_url=llm_base_url
+            )
+        elif llm_backend == 'openai' and os.getenv('OPENAI_API_KEY'):
             self.llm_controller = LLMController(
                 backend='openai',
                 model=llm_model,
-                api_key=api_key
+                api_key=os.getenv('OPENAI_API_KEY')
             )
+        elif llm_backend == 'ollama':
+            self.llm_controller = LLMController(backend='ollama', model=llm_model)
         else:
             logger.warning(
                 "\n" + "="*60 +
@@ -98,6 +113,14 @@ class MemoryBuilder:
         self.episode_event_map = {}
         self.session_nodes = {}
         self.session_event_map = {}
+
+    def apply_relation_strategy(self) -> int:
+        """Enrich existing MAGMA-selected edges without changing topology."""
+        strategy = create_relation_strategy(self.relation_mode, self.llm_controller)
+        return strategy.apply(self.trg.graph_db)
+
+    def get_relation_statistics(self) -> Dict:
+        return relation_statistics(self.trg.graph_db, self.relation_mode)
 
     def _simple_entity_extraction(self, text: str) -> List[str]:
         """

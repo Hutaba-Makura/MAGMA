@@ -794,6 +794,7 @@ class QueryEngine:
         if len(session_candidates) > 0:
             logger.info(f"Filtered out {len(session_candidates)} SESSION nodes, keeping {len(all_candidates)} EVENT candidates")
 
+        traversed_edge_count = 0
         if not self.ablation_config.get('basic_retrieval') and all_candidates:
             num_initial = 30 if query_type == 'multi_hop' else 15
             initial_top = sorted(
@@ -802,7 +803,7 @@ class QueryEngine:
                 reverse=True
             )[:num_initial]
 
-            traversed = self._adaptive_graph_traversal(
+            traversed, traversed_edge_count = self._adaptive_graph_traversal(
                 anchor_nodes=initial_top,
                 question=question,
                 similarity_threshold=adaptive_params.get('similarity_threshold', 0.3),
@@ -856,6 +857,18 @@ class QueryEngine:
             narrative_context=f"Retrieved {len(all_candidates)} candidates → top {len(top_nodes)} selected, {len(session_nodes)} sessions"
         )
 
+        retrieved_ids = {node.node_id for node in top_nodes}
+        retrieved_edges = []
+        for link in self.trg.graph_db.links.values():
+            if link.source_node_id in retrieved_ids and link.target_node_id in retrieved_ids:
+                retrieved_edges.append({
+                    'source_node_id': link.source_node_id,
+                    'target_node_id': link.target_node_id,
+                    'link_type': link.link_type.value,
+                    'sub_type': link.properties.get('sub_type'),
+                    'sub_relation': link.properties.get('sub_relation'),
+                })
+
         final_context.metadata = {
             'query_type': query_type,
             'total_candidates': len(all_candidates),
@@ -864,7 +877,15 @@ class QueryEngine:
             'scan_search_count': added if 'added' in locals() else 0,
             'top_k_requested': top_k,
             'top_k_returned': len(top_nodes),
-            'adaptive_params': adaptive_params
+            'adaptive_params': adaptive_params,
+            'retrieved_node_ids': [node.node_id for node in top_nodes],
+            'retrieved_link_types': sorted({edge['link_type'] for edge in retrieved_edges}),
+            'retrieved_sub_relations': sorted({
+                edge['sub_relation'] for edge in retrieved_edges if edge['sub_relation']
+            }),
+            'number_of_retrieved_nodes': len(top_nodes),
+            'number_of_traversed_edges': traversed_edge_count,
+            'retrieved_edges': retrieved_edges,
         }
 
         answer_context = self.answer_formatter.format_context_for_qa(
@@ -872,6 +893,24 @@ class QueryEngine:
             question,
             session_nodes=session_nodes
         )
+
+        # Original mode has no sub_relation and therefore follows the exact
+        # baseline answer-context path. Experimental labels are exposed only
+        # when present; LinkType/sub_type retrieval behavior remains unchanged.
+        relation_lines = []
+        retrieved_by_id = {node.node_id: node for node in top_nodes}
+        for edge in retrieved_edges[:30]:
+            if edge['sub_relation']:
+                source = retrieved_by_id.get(edge['source_node_id'])
+                target = retrieved_by_id.get(edge['target_node_id'])
+                source_text = getattr(source, 'content_narrative', '') or getattr(source, 'summary', '')
+                target_text = getattr(target, 'content_narrative', '') or getattr(target, 'summary', '')
+                relation_lines.append(
+                    f"{str(source_text)[:180]} -- {edge['link_type']} / "
+                    f"{edge['sub_relation']} --> {str(target_text)[:180]}"
+                )
+        if relation_lines:
+            answer_context += "\n\nRELATIONSHIPS:\n" + "\n".join(relation_lines)
 
         return final_context, answer_context
 
@@ -1105,7 +1144,7 @@ class QueryEngine:
         max_depth: int = 3,
         max_nodes: int = 500,
         prefer_link_types: Optional[List[LinkType]] = None
-    ) -> List[Tuple[EventNode, float]]:
+    ) -> Tuple[List[Tuple[EventNode, float]], int]:
         """
         Adaptive BFS graph traversal with similarity filtering.
 
@@ -1144,6 +1183,7 @@ class QueryEngine:
                 queue.append((node, similarity, 0, similarity))
 
         encodings_done = len(anchor_nodes)
+        traversed_edge_count = 0
 
         while queue and len(result_nodes) < max_nodes:
             current_node, current_sim, depth, parent_sim = queue.popleft()
@@ -1190,9 +1230,10 @@ class QueryEngine:
                         drop = current_sim - neighbor_sim
                         if drop <= relative_drop_threshold:
                             queue.append((neighbor, neighbor_sim, depth + 1, current_sim))
+                            traversed_edge_count += 1
 
         result_nodes.sort(key=lambda x: x[1], reverse=True)
-        return result_nodes
+        return result_nodes, traversed_edge_count
 
     def _get_neighbors(self, node: EventNode, follow_link_types: Optional[Set[LinkType]] = None) -> List[EventNode]:
         """Get neighbors through graph links, considering both link types and subtypes."""

@@ -56,12 +56,13 @@ def simple_tokenize(text):
 
 class BaseLLMController(ABC):
     @abstractmethod
-    def get_completion(self, prompt: str) -> str:
+    def get_completion(self, prompt: str, **kwargs) -> str:
         """Get completion from LLM"""
         pass
 
 class OpenAIController(BaseLLMController):
-    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None):
+    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None,
+                 base_url: Optional[str] = None):
         try:
             from openai import OpenAI
             self.model = model
@@ -69,7 +70,9 @@ class OpenAIController(BaseLLMController):
                 api_key = os.getenv('OPENAI_API_KEY')
             if api_key is None:
                 raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
-            self.client = OpenAI(api_key=api_key)
+            self.base_url = base_url
+            self.is_local = bool(base_url)
+            self.client = OpenAI(api_key=api_key, base_url=base_url)
             # Track token usage across all API calls
             self.token_usage = {
                 'prompt_tokens': [],
@@ -79,20 +82,25 @@ class OpenAIController(BaseLLMController):
         except ImportError:
             raise ImportError("OpenAI package not found. Install it with: pip install openai")
 
-    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
+    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7,
+                       max_tokens: int = 1000) -> str:
         # Only require JSON if the format is JSON
         messages = []
         if response_format.get("type") in ["json_object", "json_schema"]:
             messages.append({"role": "system", "content": "You must respond with a JSON object."})
         messages.append({"role": "user", "content": prompt})
 
-        response = self.client.chat.completions.create(
+        request = dict(
             model=self.model,
             messages=messages,
             response_format=response_format,
             temperature=temperature,
-            max_tokens=1000
+            max_tokens=max_tokens
         )
+        if self.is_local and "qwen3" in self.model.lower():
+            request["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+
+        response = self.client.chat.completions.create(**request)
 
         # Track token usage from this API call
         if hasattr(response, 'usage'):
@@ -150,7 +158,8 @@ class OllamaController(BaseLLMController):
         
         return result
 
-    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7) -> str:
+    def get_completion(self, prompt: str, response_format: dict, temperature: float = 0.7,
+                       max_tokens: int = 1000) -> str:
         try:
             response = completion(
                 model="ollama_chat/{}".format(self.model),
@@ -168,15 +177,21 @@ class OllamaController(BaseLLMController):
 class LLMController:
     """LLM-based controller for memory metadata generation"""
     def __init__(self, 
-                 backend: Literal["openai", "ollama"] = "openai",
-                 model: str = "gpt-4", 
-                 api_key: Optional[str] = None):
+                 backend: Literal["local", "openai", "ollama"] = "openai",
+                 model: str = "gpt-4",
+                 api_key: Optional[str] = None,
+                 base_url: Optional[str] = None):
         if backend == "openai":
             self.llm = OpenAIController(model, api_key)
+        elif backend == "local":
+            if not base_url:
+                raise ValueError("Local backend requires an OpenAI-compatible base_url")
+            # Never read OPENAI_API_KEY in local mode. vLLM accepts this dummy key.
+            self.llm = OpenAIController(model, api_key="local-vllm", base_url=base_url)
         elif backend == "ollama":
             self.llm = OllamaController(model)
         else:
-            raise ValueError("Backend must be either 'openai' or 'ollama'")
+            raise ValueError("Backend must be 'local', 'openai', or 'ollama'")
 
 class MemoryNote:
     """Basic memory unit with metadata"""

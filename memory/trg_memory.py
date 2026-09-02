@@ -77,6 +77,7 @@ class TemporalResonanceGraphMemory:
                  embedding_model: str = 'minilm',
                  llm_backend: str = 'openai',
                  llm_model: str = 'gpt-4o-mini',
+                 llm_base_url: Optional[str] = None,
                  persist_dir: Optional[str] = None,
                  enable_async: bool = False):
         """
@@ -121,7 +122,8 @@ class TemporalResonanceGraphMemory:
                 self.llm_controller = LLMController(
                     backend=llm_backend,
                     model=llm_model,
-                    api_key=api_key
+                    api_key=api_key,
+                    base_url=llm_base_url
                 )
             except Exception as e:
                 logging.warning(f"Failed to initialize LLM controller: {e}")

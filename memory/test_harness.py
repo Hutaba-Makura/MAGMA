@@ -397,6 +397,16 @@ class TestHarness:
                 'search_details': search_details
             }
 
+            if query_context and hasattr(query_context, 'metadata'):
+                retrieval = query_context.metadata
+                result.update({
+                    'retrieved_node_ids': retrieval.get('retrieved_node_ids', []),
+                    'retrieved_link_types': retrieval.get('retrieved_link_types', []),
+                    'retrieved_sub_relations': retrieval.get('retrieved_sub_relations', []),
+                    'number_of_retrieved_nodes': retrieval.get('number_of_retrieved_nodes', 0),
+                    'number_of_traversed_edges': retrieval.get('number_of_traversed_edges', 0),
+                })
+
             if llm_score < 0.5:
                 result['answer_context'] = full_answer_context
 
@@ -544,6 +554,16 @@ class TestHarness:
                     'llm_judge_score': llm_score,
                     'search_details': search_details
                 }
+
+                if query_context and hasattr(query_context, 'metadata'):
+                    retrieval = query_context.metadata
+                    result.update({
+                        'retrieved_node_ids': retrieval.get('retrieved_node_ids', []),
+                        'retrieved_link_types': retrieval.get('retrieved_link_types', []),
+                        'retrieved_sub_relations': retrieval.get('retrieved_sub_relations', []),
+                        'number_of_retrieved_nodes': retrieval.get('number_of_retrieved_nodes', 0),
+                        'number_of_traversed_edges': retrieval.get('number_of_traversed_edges', 0),
+                    })
 
                 # Only add answer_context for wrong answers
                 if llm_score < 0.5:

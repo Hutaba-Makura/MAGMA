@@ -19,6 +19,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from collections import defaultdict
 import warnings
+import hashlib
 
 warnings.filterwarnings("ignore")
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
@@ -52,15 +53,25 @@ def score_only_mode(args):
     print("="*70)
 
     api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
+    if args.llm_backend == 'openai' and not api_key:
         print("Error: OPENAI_API_KEY not found. Cannot perform LLM-based evaluation.")
         return 1
 
     llm_controller = LLMController(
-        backend='openai',
+        backend=args.llm_backend,
         model=args.model,
-        api_key=api_key
+        api_key=api_key if args.llm_backend == 'openai' else None,
+        base_url=args.llm_base_url if args.llm_backend == 'local' else None
     )
+    if args.llm_backend == 'local':
+        try:
+            available_models = [item.id for item in llm_controller.llm.client.models.list().data]
+        except Exception as exc:
+            print(f"Error: local LLM endpoint is unavailable at {args.llm_base_url}: {exc}")
+            return 1
+        if args.model not in available_models:
+            print(f"Error: local model {args.model!r} is not served; available: {available_models}")
+            return 1
 
     evaluator = Evaluator(llm_controller=llm_controller, use_llm_judge=True)
     print(f"Evaluator initialized with model: {args.model}\n")
@@ -75,16 +86,8 @@ def score_only_mode(args):
         if args.input_results:
             input_file = args.input_results
         else:
-            model_name_normalized = args.model.replace(".", "_").replace("-", "_")
-            model_specific_file = f"results_{model_name_normalized}/fixed_results_sample{sample_id}.json"
-            default_file = f"results/fixed_results_sample{sample_id}.json"
-
-            if Path(model_specific_file).exists():
-                input_file = model_specific_file
-            elif Path(default_file).exists():
-                input_file = default_file
-            else:
-                input_file = default_file
+            embedding_suffix = "_openai" if args.embedding_model == "openai" else ""
+            input_file = f"results_relation/{args.relation_mode}_sample{sample_id}{embedding_suffix}.json"
 
         if not Path(input_file).exists():
             print(f"Error: Results file not found: {input_file}")
@@ -187,9 +190,9 @@ def score_only_mode(args):
             print(f"  {cat:<5} {stats['total']:<7} {stats['correct']:<8} {acc:<7.1f} {avg_f1_cat:<7.1f} {avg_bleu1_cat:<7.1f} {avg_llm_cat:<7.1f}")
 
         model_name_normalized = args.model.replace(".", "_").replace("-", "_")
-        results_dir = f"results_{model_name_normalized}"
+        results_dir = "results_relation"
         os.makedirs(results_dir, exist_ok=True)
-        output_file = f"{results_dir}/rescored_results_sample{sample_id}.json"
+        output_file = f"{results_dir}/{args.relation_mode}_sample{sample_id}_rescored.json"
         category_breakdown = {}
         for cat in sorted(category_stats.keys()):
             stats = category_stats[cat]
@@ -237,9 +240,9 @@ def score_only_mode(args):
 
         print(f"\nRe-scored results saved to {output_file}")
 
-        wrong_answers = [r for r in test_results if r.get('llm_judge_score', 0) < 0.5]
+        wrong_answers = [r for r in updated_results if r.get('llm_judge_score', 0) < 0.5]
         if wrong_answers:
-            wrong_output_file = f"{results_dir}/fixed_results_sample{sample_id}_wrong.json"
+            wrong_output_file = f"{results_dir}/{args.relation_mode}_sample{sample_id}_rescored_wrong.json"
 
             category_names = {
                 1: "Multi-hop",
@@ -265,9 +268,9 @@ def score_only_mode(args):
 
             wrong_summary = {
                 'sample_id': sample_id,
-                'total_questions': len(test_results),
+                'total_questions': len(updated_results),
                 'total_wrong': len(wrong_answers),
-                'wrong_percentage': len(wrong_answers) / len(test_results) * 100,
+                'wrong_percentage': len(wrong_answers) / len(updated_results) * 100 if updated_results else 0,
                 'wrong_questions': formatted_wrong
             }
 
@@ -339,16 +342,22 @@ def main():
     parser.add_argument("--dataset", default="data/locomo10.json")
     parser.add_argument("--sample", type=int, nargs='+', default=[0],
                        help="Sample IDs to test (can specify multiple, e.g., --sample 0 1 2)")
-    parser.add_argument("--max-questions", type=int, default=50)
-    parser.add_argument("--cache-dir", default="./locomo_trg_fixed")
+    parser.add_argument("--max-questions", type=int, default=40)
+    parser.add_argument("--cache-dir", default="./locomo_relation_experiment")
     parser.add_argument("--rebuild", action="store_true", help="Force rebuild memory")
-    parser.add_argument("--model", type=str, default="gpt-4o-mini",
-                       help="OpenAI model to use (e.g., gpt-4o-mini, gpt-4.1-mini, gpt-3.5-turbo, gpt-4o)")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B-AWQ",
+                       help="LLM model name (default: local Qwen3-8B-AWQ)")
+    parser.add_argument("--llm-backend", choices=["local", "openai", "ollama"],
+                       default="local", help="LLM backend; local never uses OPENAI_API_KEY")
+    parser.add_argument("--llm-base-url", default="http://127.0.0.1:8000/v1",
+                       help="OpenAI-compatible endpoint used by --llm-backend local")
     parser.add_argument("--embedding-model", type=str, default="minilm",
                        choices=["minilm", "openai"],
                        help="Embedding model to use: 'minilm' (all-MiniLM-L6-v2, 384-dim) or 'openai' (text-embedding-3-small, 1536-dim)")
     parser.add_argument("--use-episodes", action="store_true",
                        help="Use episode-based segmentation instead of turn-based (groups related turns)")
+    parser.add_argument("--relation-mode", choices=["original", "free", "hybrid"],
+                       default="original", help="Relation schema experiment mode")
     parser.add_argument("--score-only", action="store_true",
                        help="Only re-score existing results without rebuilding memory or querying")
     parser.add_argument("--input-results", type=str, default=None,
@@ -361,8 +370,8 @@ def main():
                        help="Disable parallel testing (parallel is enabled by default for 3x speedup)")
     parser.add_argument("--n-workers", type=int, default=3,
                        help="Number of parallel workers (default: 3)")
-    parser.add_argument("--best-of-n", type=int, default=3,
-                       help="Run each question N times and select best answer (default: 3 = best-of-3)")
+    parser.add_argument("--best-of-n", type=int, default=1,
+                       help="Run each question N times and select best answer (default: 1)")
     parser.add_argument("--best-of-n-method", type=str, default="llm_judge",
                        choices=["llm_judge", "voting", "f1"],
                        help="Method for selecting best answer: 'llm_judge', 'voting', or 'f1' (default: llm_judge)")
@@ -371,17 +380,26 @@ def main():
                        help="Run ablation study with specific configuration")
     args = parser.parse_args()
 
+    # Defense in depth: local runs must not allow any transitive component to
+    # discover or use a cloud credential inherited by the parent process.
+    if args.llm_backend == 'local':
+        os.environ.pop('OPENAI_API_KEY', None)
+
     # Parallel is enabled by default
     args.parallel = not args.no_parallel
 
     print("="*70)
     print("  Fixed TRG Memory System Test")
     print(f"  Model: {args.model}")
+    print(f"  LLM backend: {args.llm_backend}")
+    if args.llm_backend == 'local':
+        print(f"  Local endpoint: {args.llm_base_url}")
     if args.score_only:
         print(f"  Mode: SCORE-ONLY (Re-evaluation)")
     else:
         print(f"  Mode: {'Episode-based' if args.use_episodes else 'Turn-based'}")
     print(f"  Samples: {args.sample}")
+    print(f"  Relation mode: {args.relation_mode}")
 
     # Parse categories to test
     categories_to_test = [int(c.strip()) for c in args.category_to_test.split(',')]
@@ -411,6 +429,24 @@ def main():
     if args.score_only:
         return score_only_mode(args)
 
+    if args.llm_backend == 'local':
+        if args.embedding_model == 'openai':
+            print("Error: --llm-backend local requires --embedding-model minilm to avoid cloud API use.")
+            return 1
+        try:
+            from openai import OpenAI
+            local_client = OpenAI(api_key="local-vllm", base_url=args.llm_base_url)
+            available_models = [item.id for item in local_client.models.list().data]
+        except Exception as exc:
+            print(f"Error: local LLM endpoint is unavailable at {args.llm_base_url}: {exc}")
+            print("Start the vLLM server before running the experiment; no cloud fallback is used.")
+            return 1
+        if args.model not in available_models:
+            print(f"Error: model {args.model!r} is not served by {args.llm_base_url}")
+            print(f"Available local models: {available_models}")
+            return 1
+        print(f"Local LLM ready: {args.model}")
+
     # Load dataset
     samples = load_locomo_dataset(args.dataset)
 
@@ -435,38 +471,77 @@ def main():
         # Normalize model name for folder (replace dots and hyphens with underscores)
         model_name_normalized = args.model.replace(".", "_").replace("-", "_")
 
-        if args.cache_dir == "./locomo_trg_fixed":
-            # User didn't specify custom cache dir, use auto-naming with model name
-            if args.use_episodes:
-                cache_dir = f"./locomo_trg_episodes_{model_name_normalized}/sample{sample_id}{embedding_suffix}"
-            else:
-                cache_dir = f"./locomo_trg_cache_{model_name_normalized}/sample{sample_id}{embedding_suffix}"
-            print(f"Auto cache directory: {cache_dir}")
-            print(f"Embedding model: {args.embedding_model}")
-        else:
-            # User specified custom cache dir with sample ID in subdirectory
-            cache_dir = f"{args.cache_dir}/sample{sample_id}{embedding_suffix}"
-            print(f"Custom cache directory: {cache_dir}")
-            print(f"Embedding model: {args.embedding_model}")
+        cache_dir = f"{args.cache_dir}/{args.relation_mode}/sample{sample_id}{embedding_suffix}"
+        common_cache_dir = f"{args.cache_dir}/common/sample{sample_id}{embedding_suffix}"
+        print(f"Mode cache directory: {cache_dir}")
+        print(f"Shared baseline cache: {common_cache_dir}")
+        print(f"Embedding model: {args.embedding_model}")
 
         # Initialize memory builder
         builder = MemoryBuilder(
             cache_dir=cache_dir,
             llm_model=args.model,
             use_episodes=args.use_episodes,
-            embedding_model=args.embedding_model
+            embedding_model=args.embedding_model,
+            relation_mode=args.relation_mode,
+            llm_backend=args.llm_backend,
+            llm_base_url=args.llm_base_url
         )
 
-        # Build or load memory
+        # Build/load a mode cache. On rebuild, Free and Hybrid start from the
+        # same cached baseline graph so node IDs, episodes, and edge pairs match.
         cache_file = Path(cache_dir) / "graph.json"
-        if cache_file.exists() and not args.rebuild:
+        mode_manifest_path = Path(cache_dir) / "manifest.json"
+        common_graph = Path(common_cache_dir) / "graph.json"
+        manifest_path = Path(common_cache_dir) / "manifest.json"
+        dataset_digest = hashlib.sha256(Path(args.dataset).read_bytes()).hexdigest()
+        expected_manifest = {
+            'dataset_sha256': dataset_digest,
+            'sample_id': sample_id,
+            'model': args.model,
+            'llm_backend': args.llm_backend,
+            'llm_base_url': args.llm_base_url if args.llm_backend == 'local' else None,
+            'embedding_model': args.embedding_model,
+            'use_episodes': args.use_episodes,
+        }
+        expected_mode_manifest = {**expected_manifest, 'relation_mode': args.relation_mode}
+        mode_cache_valid = False
+        if cache_file.exists() and mode_manifest_path.exists():
+            try:
+                mode_cache_valid = json.loads(mode_manifest_path.read_text()) == expected_mode_manifest
+            except (OSError, json.JSONDecodeError):
+                mode_cache_valid = False
+
+        if mode_cache_valid and not args.rebuild:
             logger.info("Loading cached memory...")
             builder.load()
         else:
-            logger.info("Building memory...")
-            stats = builder.build_memory(sample)
+            common_valid = False
+            if common_graph.exists() and manifest_path.exists():
+                try:
+                    common_valid = json.loads(manifest_path.read_text()) == expected_manifest
+                except (OSError, json.JSONDecodeError):
+                    common_valid = False
+
+            # Rebuilding Original refreshes the shared baseline. Other modes
+            # consume it when compatible, or create it if this is the first run.
+            if common_valid and args.relation_mode != 'original':
+                builder.cache_dir = Path(common_cache_dir)
+                builder.load()
+            else:
+                logger.info("Building shared baseline memory...")
+                builder.build_memory(sample)
+                builder.cache_dir = Path(common_cache_dir)
+                builder.save()
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text(json.dumps(expected_manifest, indent=2))
+
+            builder.cache_dir = Path(cache_dir)
+            enriched_edges = builder.apply_relation_strategy()
+            print(f"Relation-enriched edges: {enriched_edges}")
             builder.save()
-            # print(f"Memory built: {stats}")
+            mode_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            mode_manifest_path.write_text(json.dumps(expected_mode_manifest, indent=2))
 
         # Get memory stats
         mem_stats = builder.trg.get_statistics()
@@ -606,9 +681,9 @@ def main():
         # Save per-sample results with model-specific directory
         embedding_suffix = "_openai" if args.embedding_model == "openai" else ""
         # Create model-specific results directory
-        results_dir = f"results_{model_name_normalized}"
+        results_dir = "results_relation"
         os.makedirs(results_dir, exist_ok=True)
-        output_file = f"{results_dir}/fixed_results_sample{sample_id}{embedding_suffix}.json"
+        output_file = f"{results_dir}/{args.relation_mode}_sample{sample_id}{embedding_suffix}.json"
         category_breakdown = {}
         for cat in sorted(category_stats.keys()):
             stats = category_stats[cat]
@@ -628,9 +703,14 @@ def main():
         with open(output_file, 'w') as f:
             json.dump({
                 'sample_id': sample_id,
+                'relation_mode': args.relation_mode,
                 'timestamp': datetime.now().isoformat(),
                 'embedding_model': args.embedding_model,
                 'llm_model': args.model,
+                'llm_backend': args.llm_backend,
+                'llm_base_url': args.llm_base_url if args.llm_backend == 'local' else None,
+                'llm_backend': args.llm_backend,
+                'llm_base_url': args.llm_base_url if args.llm_backend == 'local' else None,
                 'results': results,
                 'stats': {
                     'overall': {
@@ -651,7 +731,8 @@ def main():
                         'avg_llm': llm_no_cat5
                     },
                     'category_breakdown': category_breakdown,
-                    'memory_stats': mem_stats
+                    'memory_stats': mem_stats,
+                    'relation_stats': builder.get_relation_statistics()
                 }
             }, f, indent=2, default=str)
 
@@ -742,17 +823,18 @@ def main():
 
         # Save aggregate results in model-specific directory
         embedding_suffix = "_openai" if args.embedding_model == "openai" else ""
-        # Use same model-specific results directory
+        # Keep aggregate outputs beside the per-mode experiment results.
         model_name_normalized = args.model.replace(".", "_").replace("-", "_")
-        results_dir = f"results_{model_name_normalized}"
+        results_dir = "results_relation"
         os.makedirs(results_dir, exist_ok=True)
-        aggregate_output = f"{results_dir}/fixed_results_aggregate_samples_{'_'.join(map(str, args.sample))}{embedding_suffix}.json"
+        aggregate_output = f"{results_dir}/{args.relation_mode}_aggregate_samples_{'_'.join(map(str, args.sample))}{embedding_suffix}.json"
         with open(aggregate_output, 'w') as f:
             json.dump({
                 'timestamp': datetime.now().isoformat(),
                 'embedding_model': args.embedding_model,
                 'llm_model': args.model,
                 'samples': args.sample,
+                'relation_mode': args.relation_mode,
                 'per_sample_results': all_sample_results,
                 'aggregate': {
                     'avg_accuracy': avg_accuracy,
