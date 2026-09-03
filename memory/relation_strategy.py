@@ -10,7 +10,10 @@ import hashlib
 import logging
 import re
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict
+
+from tqdm import tqdm
 
 from .graph_db import LinkType
 
@@ -64,6 +67,12 @@ class _GeneratedRelationStrategy(RelationStrategy):
     include_category = True
 
     def apply(self, graph_db) -> int:
+        is_local = bool(
+            self.llm_controller
+            and hasattr(self.llm_controller, "llm")
+            and getattr(self.llm_controller.llm, "is_local", False)
+        )
+        batch_size = 24 if is_local else self.batch_size
         edge_groups = defaultdict(list)
         for link in graph_db.links.values():
             original_subtype = str(link.properties.get("sub_type", "relation")).lower()
@@ -84,10 +93,25 @@ class _GeneratedRelationStrategy(RelationStrategy):
             edge_groups[key].append(link)
 
         keys = list(edge_groups)
+        batches = [keys[start:start + batch_size]
+                   for start in range(0, len(keys), batch_size)]
         generated_by_key = {}
-        for start in range(0, len(keys), self.batch_size):
-            batch = keys[start:start + self.batch_size]
-            generated_by_key.update(self._generate_batch(batch))
+        # The local vLLM launch configuration allows four simultaneous
+        # sequences. Matching that here avoids hundreds of fully serial calls.
+        workers = min(4, len(batches)) if is_local else 1
+        description = f"Generating {self.mode} relations"
+        if workers == 1:
+            for batch in tqdm(batches, desc=description, unit="batch"):
+                generated_by_key.update(self._generate_batch(batch))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(self._generate_batch, batch)
+                           for batch in batches]
+                with tqdm(total=len(futures), desc=description,
+                          unit="batch") as progress:
+                    for future in as_completed(futures):
+                        generated_by_key.update(future.result())
+                        progress.update(1)
 
         enriched = 0
         for key, links in edge_groups.items():
@@ -140,7 +164,7 @@ class _GeneratedRelationStrategy(RelationStrategy):
                 self.batch_prompt(records),
                 response_format={"type": "json_object"},
                 temperature=0,
-                max_tokens=8000,
+                max_tokens=(3000 if getattr(self.llm_controller.llm, "is_local", False) else 8000),
             )
             parsed = json.loads(response).get("relations", [])
             for item in parsed:

@@ -14,10 +14,11 @@ import os
 import sys
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
-from collections import defaultdict
+from collections import Counter, defaultdict
 import warnings
 import hashlib
 
@@ -36,6 +37,49 @@ from memory.evaluator import Evaluator
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def format_duration(seconds: float) -> str:
+    """Format wall-clock seconds as HH:MM:SS."""
+    seconds = max(0, round(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def select_balanced_questions(questions, categories, limit):
+    """Select up to limit questions with near-equal deterministic category quotas."""
+    if not limit or not categories:
+        return list(questions)
+
+    ordered_categories = sorted(categories)
+    base, remainder = divmod(limit, len(ordered_categories))
+    quotas = {
+        category: base + (index < remainder)
+        for index, category in enumerate(ordered_categories)
+    }
+    selected = []
+    selected_ids = set()
+    counts = Counter()
+    for question in questions:
+        category = int(question.category)
+        if category in quotas and counts[category] < quotas[category]:
+            selected.append(question)
+            selected_ids.add(id(question))
+            counts[category] += 1
+
+    # If a category has fewer available questions than its quota, fill the
+    # remaining slots in original dataset order from the other categories.
+    if len(selected) < limit:
+        for question in questions:
+            if id(question) not in selected_ids:
+                selected.append(question)
+                selected_ids.add(id(question))
+                if len(selected) == limit:
+                    break
+
+    # Restore source order so all relation modes receive the identical sequence.
+    return [question for question in questions if id(question) in selected_ids]
 
 def score_only_mode(args):
     """
@@ -337,12 +381,16 @@ def score_only_mode(args):
 
 def main():
     """Main test function - supports multiple samples"""
+    run_started = time.perf_counter()
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="data/locomo10.json")
     parser.add_argument("--sample", type=int, nargs='+', default=[0],
                        help="Sample IDs to test (can specify multiple, e.g., --sample 0 1 2)")
-    parser.add_argument("--max-questions", type=int, default=40)
+    parser.add_argument("--max-questions", type=int, default=30,
+                       help="Maximum questions per sample (default: 30)")
+    parser.add_argument("--balanced-categories", action="store_true",
+                       help="Select near-equal counts from requested categories")
     parser.add_argument("--cache-dir", default="./locomo_relation_experiment")
     parser.add_argument("--rebuild", action="store_true", help="Force rebuild memory")
     parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B-AWQ",
@@ -400,6 +448,8 @@ def main():
         print(f"  Mode: {'Episode-based' if args.use_episodes else 'Turn-based'}")
     print(f"  Samples: {args.sample}")
     print(f"  Relation mode: {args.relation_mode}")
+    print(f"  Questions per sample: {args.max_questions}")
+    print(f"  Balanced category sampling: {args.balanced_categories}")
 
     # Parse categories to test
     categories_to_test = [int(c.strip()) for c in args.category_to_test.split(',')]
@@ -460,6 +510,7 @@ def main():
     all_sample_results = []
 
     for sample_idx, sample_id in enumerate(args.sample, 1):
+        sample_started = time.perf_counter()
         sample = samples[sample_id]
 
         print(f"\n{'='*70}")
@@ -547,9 +598,11 @@ def main():
         mem_stats = builder.trg.get_statistics()
         print(f"\nMemory Statistics:")
         print(f"  Total nodes: {mem_stats['total_nodes']}")
-        print(f"  Total links: {mem_stats['links_created']}")
+        total_links = mem_stats.get('total_links', mem_stats['links_created'])
+        print(f"  Total links: {total_links}")
+        print(f"  Total vectors: {mem_stats['total_vectors']}")
         if mem_stats['total_nodes'] > 0:
-            print(f"  Links per node: {mem_stats['links_created']/mem_stats['total_nodes']:.1f}")
+            print(f"  Links per node: {total_links/mem_stats['total_nodes']:.1f}")
         print(f"  Node types: {mem_stats['node_types']}")
         print(f"  Link types: {mem_stats['link_types']}")
 
@@ -593,6 +646,19 @@ def main():
         sample.qa = [qa for qa in sample.qa if qa.category in categories_to_test]
         filtered_count = len(sample.qa)
 
+        if args.balanced_categories:
+            sample.qa = select_balanced_questions(
+                sample.qa, categories_to_test, args.max_questions
+            )
+            selected_counts = Counter(int(qa.category) for qa in sample.qa)
+            print(
+                "Balanced question selection: "
+                + ", ".join(
+                    f"Category {category}={selected_counts.get(category, 0)}"
+                    for category in sorted(categories_to_test)
+                )
+            )
+
         if filtered_count < original_count:
             print(f"\nFiltered questions: {original_count} → {filtered_count}")
             print(f"Testing categories: {sorted(categories_to_test)}\n")
@@ -600,10 +666,12 @@ def main():
             print(f"\nTesting all {filtered_count} questions\n")
 
         # Test questions (parallel is now default)
+        test_started = time.perf_counter()
         if args.parallel:
             results = tester.test_questions_parallel(sample, args.max_questions, n_workers=args.n_workers)
         else:
             results = tester.test_questions(sample, args.max_questions)
+        test_elapsed = time.perf_counter() - test_started
 
         # Calculate results for this sample
         total = len(results)
@@ -654,6 +722,7 @@ def main():
         print(f"  Average BLEU-1: {avg_bleu1:.1f}%")
         print(f"  Average LLM Judge Score: {avg_llm_score:.1f}%")
         print(f"  Information not found: {not_found} ({not_found/total*100:.1f}%)")
+        print(f"  Question test time: {format_duration(test_elapsed)} ({test_elapsed:.1f} seconds)")
 
         print(f"\n{'-'*70}")
         print(f"Sample {sample_id} Results WITHOUT Category 5:")
@@ -700,6 +769,7 @@ def main():
                 'avg_llm': avg_llm_cat
             }
 
+        sample_elapsed_before_save = time.perf_counter() - sample_started
         with open(output_file, 'w') as f:
             json.dump({
                 'sample_id': sample_id,
@@ -709,6 +779,15 @@ def main():
                 'llm_model': args.model,
                 'llm_backend': args.llm_backend,
                 'llm_base_url': args.llm_base_url if args.llm_backend == 'local' else None,
+                'max_questions': args.max_questions,
+                'balanced_categories': args.balanced_categories,
+                'selected_category_counts': dict(
+                    sorted(Counter(int(result['category']) for result in results).items())
+                ),
+                'timing': {
+                    'question_test_seconds': test_elapsed,
+                    'sample_seconds_before_save': sample_elapsed_before_save
+                },
                 'llm_backend': args.llm_backend,
                 'llm_base_url': args.llm_base_url if args.llm_backend == 'local' else None,
                 'results': results,
@@ -737,6 +816,11 @@ def main():
             }, f, indent=2, default=str)
 
         print(f"Results saved to {output_file}")
+        sample_elapsed = time.perf_counter() - sample_started
+        print(
+            f"Sample {sample_id} total elapsed time: "
+            f"{format_duration(sample_elapsed)} ({sample_elapsed:.1f} seconds)"
+        )
 
         # Store for aggregation
         all_sample_results.append({
@@ -748,6 +832,8 @@ def main():
             'avg_bleu1': avg_bleu1,
             'avg_llm': avg_llm_score,
             'accuracy_no_cat5': correct_no_cat5/total_no_cat5*100 if total_no_cat5 > 0 else 0,
+            'question_test_seconds': test_elapsed,
+            'sample_elapsed_seconds': sample_elapsed,
             'category_breakdown': category_breakdown
         })
 
@@ -846,6 +932,14 @@ def main():
                 }
             }, f, indent=2)
         print(f"\nAggregate results saved to {aggregate_output}")
+
+    run_elapsed = time.perf_counter() - run_started
+    print(f"\n{'='*70}")
+    print(
+        f"TOTAL RUN ELAPSED TIME: {format_duration(run_elapsed)} "
+        f"({run_elapsed:.1f} seconds)"
+    )
+    print(f"{'='*70}")
 
     return 0
 

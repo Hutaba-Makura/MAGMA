@@ -9,8 +9,6 @@ import dotenv
 
 dotenv.load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 ACCURACY_PROMPT = """
 Score the answer on a scale from 0.0 to 1.0 based on semantic correctness.
 
@@ -52,7 +50,9 @@ class LLMJudge:
     def __init__(self, llm_controller=None):
         """
         Args:
-            llm_controller: Optional LLM controller (not used, uses global client)
+            llm_controller: LLM controller used by the memory/query pipeline.
+                Passing it keeps evaluation on the same backend (including local
+                OpenAI-compatible vLLM) instead of making a separate cloud call.
         """
         self.llm_controller = llm_controller
 
@@ -84,7 +84,10 @@ class LLMJudge:
                     'reasoning': "Category 5: Hallucinated answer for adversarial question (should be unanswerable)"
                 }
 
-        score = evaluate_llm_judge(question, gold_answer, predicted_answer)
+        score = evaluate_llm_judge(
+            question, gold_answer, predicted_answer,
+            llm_controller=self.llm_controller
+        )
         return {
             'score': score,
             'reasoning': f"Continuous LLM judge score: {score:.2f}"
@@ -125,31 +128,64 @@ class LLMJudge:
 
         return any(pattern in text_lower for pattern in patterns)
 
-def evaluate_llm_judge(question, gold_answer, generated_answer):
+def _parse_json_object(text):
+    """Parse a JSON object, tolerating markdown fences around local-model output."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
+
+
+def evaluate_llm_judge(question, gold_answer, generated_answer, llm_controller=None):
     """
     Evaluate the generated answer against the gold answer using an LLM judge.
 
     Returns:
         float: Score between 0.0 and 1.0 representing semantic correctness
     """
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are an expert grader that scores answers on a continuous scale from 0.0 to 1.0.",
-            },
-            {
-                "role": "user",
-                "content": ACCURACY_PROMPT.format(
-                    question=question, gold_answer=gold_answer, generated_answer=generated_answer
-                ),
-            }
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.0,
+    prompt = ACCURACY_PROMPT.format(
+        question=question, gold_answer=gold_answer,
+        generated_answer=generated_answer
     )
-    result = json.loads(response.choices[0].message.content)
+    if llm_controller is not None:
+        content = llm_controller.llm.get_completion(
+            prompt,
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=256,
+        )
+    else:
+        # Standalone CLI compatibility. The experiment path always passes its
+        # configured controller, so local runs never enter this cloud branch.
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "LLM judge requires an llm_controller or OPENAI_API_KEY"
+            )
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are an expert grader that scores answers from 0.0 to 1.0."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+        )
+        content = response.choices[0].message.content
+
+    result = _parse_json_object(content)
     score = float(result.get("score", 0.0))
     score = max(0.0, min(1.0, score))
     return score

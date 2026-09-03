@@ -1137,9 +1137,12 @@ class MemoryBuilder:
         if graph_path.exists():
             self.trg.graph_db.load(str(graph_path))
 
-        vector_path = self.cache_dir / "vectors.faiss"
+        # Vector DB persistence uses a directory containing index.faiss and
+        # metadata.json.  The old vectors.faiss file check caused mode caches
+        # loaded from the shared baseline to silently lose all vectors.
+        vector_path = self.cache_dir / "vectors"
         if vector_path.exists():
-            self.trg.vector_db.load(str(self.cache_dir / "vectors"))
+            self.trg.vector_db.load(str(vector_path))
 
         index_path = self.cache_dir / "keyword_index.json"
         if index_path.exists():

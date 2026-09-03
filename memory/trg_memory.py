@@ -962,6 +962,7 @@ class TemporalResonanceGraphMemory:
         return {
             **self.stats,
             'total_nodes': self.graph_db.size() if hasattr(self.graph_db, 'size') else len(self.graph_db.nodes),
+            'total_links': len(self.graph_db.links),
             'total_vectors': self.vector_db.size(),
             'node_types': self._count_node_types(),
             'link_types': self._count_link_types()

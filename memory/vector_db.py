@@ -563,9 +563,14 @@ class VectorEncoder:
             if model_name.startswith('text-embedding'):
                 model_name = 'all-MiniLM-L6-v2'
 
-            self.model = SentenceTransformer(model_name)
+            embedding_device = os.getenv('EMBEDDING_DEVICE')
+            model_kwargs = {"device": embedding_device} if embedding_device else {}
+            self.model = SentenceTransformer(model_name, **model_kwargs)
             self.dimension = self.model.get_sentence_embedding_dimension()
-            logger.info(f"Using sentence-transformers ({model_name}, {self.dimension} dims)")
+            logger.info(
+                f"Using sentence-transformers ({model_name}, {self.dimension} dims, "
+                f"device={embedding_device or 'auto'})"
+            )
 
     def encode(self, texts: Union[str, List[str]]) -> np.ndarray:
         """Encode text(s) to vectors"""
