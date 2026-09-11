@@ -131,7 +131,10 @@ def score_only_mode(args):
             input_file = args.input_results
         else:
             embedding_suffix = "_openai" if args.embedding_model == "openai" else ""
-            input_file = f"results_relation/{args.relation_mode}_sample{sample_id}{embedding_suffix}.json"
+            input_file = str(
+                Path(args.results_dir)
+                / f"{args.relation_mode}_sample{sample_id}{embedding_suffix}.json"
+            )
 
         if not Path(input_file).exists():
             print(f"Error: Results file not found: {input_file}")
@@ -234,7 +237,7 @@ def score_only_mode(args):
             print(f"  {cat:<5} {stats['total']:<7} {stats['correct']:<8} {acc:<7.1f} {avg_f1_cat:<7.1f} {avg_bleu1_cat:<7.1f} {avg_llm_cat:<7.1f}")
 
         model_name_normalized = args.model.replace(".", "_").replace("-", "_")
-        results_dir = "results_relation"
+        results_dir = args.results_dir
         os.makedirs(results_dir, exist_ok=True)
         output_file = f"{results_dir}/{args.relation_mode}_sample{sample_id}_rescored.json"
         category_breakdown = {}
@@ -357,8 +360,7 @@ def score_only_mode(args):
         print(f"  Average LLM Judge: {avg_llm_overall:.1f}%")
         print(f"  Average Accuracy (no Cat5): {avg_accuracy_no_cat5:.1f}%")
 
-        model_name_normalized = args.model.replace(".", "_").replace("-", "_")
-        results_dir = f"results_{model_name_normalized}"
+        results_dir = args.results_dir
         os.makedirs(results_dir, exist_ok=True)
         aggregate_output = f"{results_dir}/rescored_results_aggregate_samples_{'_'.join(map(str, args.sample))}.json"
         with open(aggregate_output, 'w') as f:
@@ -392,6 +394,11 @@ def main():
     parser.add_argument("--balanced-categories", action="store_true",
                        help="Select near-equal counts from requested categories")
     parser.add_argument("--cache-dir", default="./locomo_relation_experiment")
+    parser.add_argument(
+        "--results-dir",
+        default="results_relation",
+        help="Directory for per-mode and aggregate result files",
+    )
     parser.add_argument("--rebuild", action="store_true", help="Force rebuild memory")
     parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B-AWQ",
                        help="LLM model name (default: local Qwen3-8B-AWQ)")
@@ -750,7 +757,7 @@ def main():
         # Save per-sample results with model-specific directory
         embedding_suffix = "_openai" if args.embedding_model == "openai" else ""
         # Create model-specific results directory
-        results_dir = "results_relation"
+        results_dir = args.results_dir
         os.makedirs(results_dir, exist_ok=True)
         output_file = f"{results_dir}/{args.relation_mode}_sample{sample_id}{embedding_suffix}.json"
         category_breakdown = {}
@@ -911,7 +918,7 @@ def main():
         embedding_suffix = "_openai" if args.embedding_model == "openai" else ""
         # Keep aggregate outputs beside the per-mode experiment results.
         model_name_normalized = args.model.replace(".", "_").replace("-", "_")
-        results_dir = "results_relation"
+        results_dir = args.results_dir
         os.makedirs(results_dir, exist_ok=True)
         aggregate_output = f"{results_dir}/{args.relation_mode}_aggregate_samples_{'_'.join(map(str, args.sample))}{embedding_suffix}.json"
         with open(aggregate_output, 'w') as f:

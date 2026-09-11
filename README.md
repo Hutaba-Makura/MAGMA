@@ -84,6 +84,22 @@ python test_fixed_memory.py --sample 0 1 2 --max-questions 50
 # Full dataset path: data/locomo10.json
 ```
 
+### Qwen3-14B three-relation comparison in tmux
+
+The launcher starts a local `Qwen/Qwen3-14B-AWQ` vLLM server and evaluates
+the same 50 balanced questions (categories 1–4) in `original`, `free`, and
+`hybrid` mode. The detached tmux session continues after SSH disconnects.
+
+```bash
+bash scripts/run_locomo_qwen14b_tmux.sh
+bash scripts/run_locomo_qwen14b_tmux.sh status
+tmux attach -t magma-qwen14b-locomo50
+```
+
+Results are written to `results_relation_qwen3_14b/`; model/cache files are
+kept separate from prior 8B runs. The default GPUs are 2 and 3 and can be
+overridden, for example with `GPU_IDS=4,5`.
+
 ### Testing with LongMemEval Dataset
 
 ```bash
