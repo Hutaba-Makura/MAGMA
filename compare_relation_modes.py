@@ -51,7 +51,7 @@ def save_comparison_figure(runs, output_path: Path, sample: int) -> None:
     axes[0].grid(axis="y", alpha=0.25)
     axes[0].legend(frameon=False)
 
-    categories = [category for category in (1, 2, 3, 4)
+    categories = [category for category in (1, 2, 3, 4, 5)
                   if all(f"category_{category}" in runs[mode]["stats"].get("category_breakdown", {})
                          for mode in modes)]
     x = np.arange(len(categories))

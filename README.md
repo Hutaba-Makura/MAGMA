@@ -87,8 +87,9 @@ python test_fixed_memory.py --sample 0 1 2 --max-questions 50
 ### Qwen3-14B three-relation comparison in tmux
 
 The launcher starts a local `Qwen/Qwen3-14B-AWQ` vLLM server and evaluates
-the same 50 balanced questions (categories 1–4) in `original`, `free`, and
-`hybrid` mode. The detached tmux session continues after SSH disconnects.
+the same 50 balanced questions (10 from each LoCoMo category 1–5, including
+Adversarial) in `original`, `free`, and `hybrid` mode. The detached tmux
+session continues after SSH disconnects.
 
 ```bash
 bash scripts/run_locomo_qwen14b_tmux.sh

@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 # Launch a detached tmux job that serves Qwen3-14B-AWQ locally and evaluates
-# the same 50 balanced LoCoMo questions with all three relation strategies.
+# the same 50 balanced LoCoMo questions (all five categories) with all three
+# relation strategies.
 
 script_path="$(readlink -f "${BASH_SOURCE[0]}")"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -194,7 +195,7 @@ common_args=(
     --sample 0
     --max-questions 50
     --balanced-categories
-    --category-to-test 1,2,3,4
+    --category-to-test 1,2,3,4,5
     --use-episodes
     --model "${model}"
     --llm-backend local
