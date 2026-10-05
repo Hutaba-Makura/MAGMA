@@ -14,6 +14,7 @@ max_model_len="${MAX_MODEL_LEN:-8192}"
 gpu_memory_utilization="${GPU_MEMORY_UTILIZATION:-0.90}"
 client_python="${CLIENT_PYTHON:-/data/student/k2312068/.conda/envs/magma/bin/python}"
 vllm_bin="${VLLM_BIN:-/data/student/k2312068/.conda/envs/gmemory-vllm/bin/vllm}"
+vllm_extra_args="${VLLM_EXTRA_ARGS:-}"
 embedding_device="${EMBEDDING_DEVICE:-cpu}"
 cache_dir="${CACHE_DIR:-${repo_dir}/locomo_relation_experiment_qwen3_14b}"
 results_dir="${RESULTS_DIR:-${repo_dir}/results_relation_qwen3_14b_full300}"
@@ -34,7 +35,7 @@ Usage:
 
 Optional environment variables:
   TMUX_SESSION, QWEN_MODEL, VLLM_PORT, GPU_IDS, MAX_MODEL_LEN,
-  GPU_MEMORY_UTILIZATION, CLIENT_PYTHON, VLLM_BIN, EMBEDDING_DEVICE,
+  GPU_MEMORY_UTILIZATION, CLIENT_PYTHON, VLLM_BIN, VLLM_EXTRA_ARGS, EMBEDDING_DEVICE,
   CACHE_DIR, RESULTS_DIR
 EOF
 }
@@ -76,7 +77,7 @@ if [[ "${1:-}" != "--worker" ]]; then
     mkdir -p "${log_dir}"
     run_log="${log_dir}/run_$(date +%Y%m%d_%H%M%S).log"
     tmux new-session -d -s "${session_name}" -c "${repo_dir}" \
-        "exec env RUN_LOG='${run_log}' TMUX_SESSION='${session_name}' QWEN_MODEL='${model}' VLLM_PORT='${port}' GPU_IDS='${gpu_ids}' MAX_MODEL_LEN='${max_model_len}' GPU_MEMORY_UTILIZATION='${gpu_memory_utilization}' CLIENT_PYTHON='${client_python}' VLLM_BIN='${vllm_bin}' EMBEDDING_DEVICE='${embedding_device}' CACHE_DIR='${cache_dir}' RESULTS_DIR='${results_dir}' LOG_DIR='${log_dir}' bash '${script_path}' --worker"
+        "exec env RUN_LOG='${run_log}' TMUX_SESSION='${session_name}' QWEN_MODEL='${model}' VLLM_PORT='${port}' GPU_IDS='${gpu_ids}' MAX_MODEL_LEN='${max_model_len}' GPU_MEMORY_UTILIZATION='${gpu_memory_utilization}' CLIENT_PYTHON='${client_python}' VLLM_BIN='${vllm_bin}' VLLM_EXTRA_ARGS='${vllm_extra_args}' EMBEDDING_DEVICE='${embedding_device}' CACHE_DIR='${cache_dir}' RESULTS_DIR='${results_dir}' LOG_DIR='${log_dir}' bash '${script_path}' --worker"
 
     echo "Started detached tmux session: ${session_name}"
     echo "Model: ${model}"
@@ -153,6 +154,7 @@ CUDA_VISIBLE_DEVICES="${gpu_ids}" "${vllm_bin}" serve "${model}" \
     --gpu-memory-utilization "${gpu_memory_utilization}" \
     --max-num-seqs 4 \
     --enable-prefix-caching \
+    ${vllm_extra_args} \
     >"${server_log}" 2>&1 &
 server_pid=$!
 
