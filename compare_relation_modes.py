@@ -29,6 +29,44 @@ def load_run(results_dir: Path, mode: str, sample: int):
     raise FileNotFoundError(f"No result for {mode}, sample {sample} in {results_dir}")
 
 
+def load_aggregate_run(results_dir: Path, mode: str, samples):
+    sample_label = "_".join(map(str, samples))
+    path = results_dir / f"{mode}_aggregate_samples_{sample_label}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"No aggregate result for {mode}: {path}")
+
+    payload = json.loads(path.read_text())
+    aggregate = payload["aggregate"]
+    category_breakdown = {
+        f"category_{category}": {
+            "accuracy": values.get("avg_accuracy", 0),
+            "avg_f1": values.get("avg_f1", 0),
+            "avg_bleu1": values.get("avg_bleu1", 0),
+            "avg_llm": values.get("avg_llm", 0),
+        }
+        for category, values in aggregate.get("category_breakdown", {}).items()
+    }
+    average_question_count = sum(
+        values.get("avg_total", 0)
+        for values in aggregate.get("category_breakdown", {}).values()
+    )
+    return {
+        "stats": {
+            "overall": {
+                "accuracy": aggregate.get("avg_accuracy", 0),
+                "avg_f1": aggregate.get("avg_f1", 0),
+                "avg_bleu1": aggregate.get("avg_bleu1", 0),
+                "avg_llm": aggregate.get("avg_llm", 0),
+                "not_found": 0,
+            },
+            "category_breakdown": category_breakdown,
+            "relation_stats": {},
+        },
+        "results": [],
+        "question_count": round(average_question_count * len(samples)),
+    }, path
+
+
 def save_comparison_figure(runs, output_path: Path, sample: int) -> None:
     """Save a compact publication-friendly comparison figure."""
     modes = list(MODES)
@@ -66,7 +104,7 @@ def save_comparison_figure(runs, output_path: Path, sample: int) -> None:
     axes[1].set_title("F1 by question category")
     axes[1].grid(axis="y", alpha=0.25)
 
-    count = len(runs[modes[0]].get("results", []))
+    count = runs[modes[0]].get("question_count", len(runs[modes[0]].get("results", [])))
     fig.suptitle(f"MAGMA relation schema comparison — Sample {sample}, n={count}", fontsize=14)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
@@ -100,13 +138,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", default="results_relation")
     parser.add_argument("--sample", type=int, default=0)
+    parser.add_argument("--samples", type=int, nargs="+", default=None)
     parser.add_argument("--output-prefix", default=None)
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
     runs = {}
     for mode in MODES:
-        runs[mode], path = load_run(results_dir, mode, args.sample)
+        if args.samples:
+            runs[mode], path = load_aggregate_run(results_dir, mode, args.samples)
+        else:
+            runs[mode], path = load_run(results_dir, mode, args.sample)
         print(f"Loaded {mode}: {path}")
 
     rows = []
@@ -158,7 +200,12 @@ def main() -> int:
     print("\nRelation statistics:")
     print(json.dumps(relation_stats, indent=2))
 
-    prefix = Path(args.output_prefix) if args.output_prefix else results_dir / f"comparison_sample{args.sample}"
+    if args.output_prefix:
+        prefix = Path(args.output_prefix)
+    elif args.samples:
+        prefix = results_dir / f"comparison_aggregate_samples_{'_'.join(map(str, args.samples))}"
+    else:
+        prefix = results_dir / f"comparison_sample{args.sample}"
     prefix.parent.mkdir(parents=True, exist_ok=True)
     json_path = prefix.with_suffix(".json")
     csv_path = prefix.with_suffix(".csv")

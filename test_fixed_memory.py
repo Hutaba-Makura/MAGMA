@@ -15,6 +15,7 @@ import sys
 import json
 import logging
 import time
+import random
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -47,8 +48,8 @@ def format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def select_balanced_questions(questions, categories, limit):
-    """Select up to limit questions with near-equal deterministic category quotas."""
+def select_balanced_questions(questions, categories, limit, seed=0):
+    """Select a reproducible stratified random subset with equal category quotas."""
     if not limit or not categories:
         return list(questions)
 
@@ -58,24 +59,28 @@ def select_balanced_questions(questions, categories, limit):
         category: base + (index < remainder)
         for index, category in enumerate(ordered_categories)
     }
-    selected = []
-    selected_ids = set()
-    counts = Counter()
+    rng = random.Random(seed)
+    by_category = {category: [] for category in ordered_categories}
     for question in questions:
         category = int(question.category)
-        if category in quotas and counts[category] < quotas[category]:
-            selected.append(question)
-            selected_ids.add(id(question))
-            counts[category] += 1
+        if category in by_category:
+            by_category[category].append(question)
+
+    selected_ids = set()
+    for category in ordered_categories:
+        candidates = by_category[category]
+        rng.shuffle(candidates)
+        selected_ids.update(id(question) for question in candidates[:quotas[category]])
 
     # If a category has fewer available questions than its quota, fill the
     # remaining slots in original dataset order from the other categories.
-    if len(selected) < limit:
-        for question in questions:
+    if len(selected_ids) < limit:
+        shuffled_questions = list(questions)
+        rng.shuffle(shuffled_questions)
+        for question in shuffled_questions:
             if id(question) not in selected_ids:
-                selected.append(question)
                 selected_ids.add(id(question))
-                if len(selected) == limit:
+                if len(selected_ids) == limit:
                     break
 
     # Restore source order so all relation modes receive the identical sequence.
@@ -393,6 +398,10 @@ def main():
                        help="Maximum questions per sample (default: 30)")
     parser.add_argument("--balanced-categories", action="store_true",
                        help="Select near-equal counts from requested categories")
+    parser.add_argument("--sampling-seed", type=int, default=20261001,
+                       help="Seed for reproducible stratified question sampling")
+    parser.add_argument("--resume", action="store_true",
+                       help="Skip completed compatible per-sample result files")
     parser.add_argument("--cache-dir", default="./locomo_relation_experiment")
     parser.add_argument(
         "--results-dir",
@@ -519,6 +528,50 @@ def main():
     for sample_idx, sample_id in enumerate(args.sample, 1):
         sample_started = time.perf_counter()
         sample = samples[sample_id]
+
+        # Resume from compatible per-sample results without rebuilding or
+        # re-querying samples that already completed successfully.
+        embedding_suffix = "_openai" if args.embedding_model == "openai" else ""
+        resume_path = (
+            Path(args.results_dir)
+            / f"{args.relation_mode}_sample{sample_id}{embedding_suffix}.json"
+        )
+        if args.resume and resume_path.exists():
+            try:
+                saved = json.loads(resume_path.read_text())
+                saved_stats = saved["stats"]
+                compatible = (
+                    saved.get("sample_id") == sample_id
+                    and saved.get("relation_mode") == args.relation_mode
+                    and saved.get("llm_model") == args.model
+                    and saved.get("llm_backend") == args.llm_backend
+                    and saved.get("embedding_model") == args.embedding_model
+                    and saved.get("max_questions") == args.max_questions
+                    and saved.get("balanced_categories") == args.balanced_categories
+                    and len(saved.get("results", [])) == args.max_questions
+                )
+                if compatible:
+                    overall = saved_stats["overall"]
+                    without_category5 = saved_stats.get("without_category5", {})
+                    timing = saved.get("timing", {})
+                    all_sample_results.append({
+                        "sample_id": sample_id,
+                        "total": overall["total"],
+                        "correct": overall["correct"],
+                        "accuracy": overall["accuracy"],
+                        "avg_f1": overall["avg_f1"],
+                        "avg_bleu1": overall["avg_bleu1"],
+                        "avg_llm": overall["avg_llm"],
+                        "accuracy_no_cat5": without_category5.get("accuracy", 0),
+                        "question_test_seconds": timing.get("question_test_seconds", 0),
+                        "sample_elapsed_seconds": timing.get("sample_seconds_before_save", 0),
+                        "category_breakdown": saved_stats["category_breakdown"],
+                    })
+                    print(f"Resume: skipping completed Sample {sample_id} from {resume_path}")
+                    continue
+                print(f"Resume: incompatible result, recomputing Sample {sample_id}: {resume_path}")
+            except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                print(f"Resume: unreadable result, recomputing Sample {sample_id}: {exc}")
 
         print(f"\n{'='*70}")
         print(f"Processing Sample {sample_id} ({sample_idx}/{len(args.sample)})")
@@ -655,7 +708,10 @@ def main():
 
         if args.balanced_categories:
             sample.qa = select_balanced_questions(
-                sample.qa, categories_to_test, args.max_questions
+                sample.qa,
+                categories_to_test,
+                args.max_questions,
+                seed=args.sampling_seed + sample_id,
             )
             selected_counts = Counter(int(qa.category) for qa in sample.qa)
             print(
@@ -850,18 +906,43 @@ def main():
         print(f"AGGREGATE RESULTS ACROSS {len(args.sample)} SAMPLES")
         print(f"{'='*70}\n")
 
-        # Calculate averages
-        avg_accuracy = sum(r['accuracy'] for r in all_sample_results) / len(all_sample_results)
-        avg_f1_overall = sum(r['avg_f1'] for r in all_sample_results) / len(all_sample_results)
-        avg_bleu1_overall = sum(r['avg_bleu1'] for r in all_sample_results) / len(all_sample_results)
-        avg_llm_overall = sum(r['avg_llm'] for r in all_sample_results) / len(all_sample_results)
-        avg_accuracy_no_cat5 = sum(r['accuracy_no_cat5'] for r in all_sample_results) / len(all_sample_results)
+        # Aggregate by question count so samples with different QA sizes have
+        # the correct weight in the full-dataset benchmark.
+        total_questions = sum(r['total'] for r in all_sample_results)
+        total_correct = sum(r['correct'] for r in all_sample_results)
+        avg_accuracy = total_correct / total_questions * 100 if total_questions else 0
+        avg_f1_overall = (
+            sum(r['avg_f1'] * r['total'] for r in all_sample_results) / total_questions
+            if total_questions else 0
+        )
+        avg_bleu1_overall = (
+            sum(r['avg_bleu1'] * r['total'] for r in all_sample_results) / total_questions
+            if total_questions else 0
+        )
+        avg_llm_overall = (
+            sum(r['avg_llm'] * r['total'] for r in all_sample_results) / total_questions
+            if total_questions else 0
+        )
+
+        # Category keys are stored outside the category payload, so derive the
+        # non-Adversarial aggregate directly from the keyed breakdowns.
+        non_cat5_total = non_cat5_correct = 0
+        for result in all_sample_results:
+            for key, category in result['category_breakdown'].items():
+                if key == 'category_5':
+                    continue
+                count = category['total']
+                non_cat5_total += count
+                non_cat5_correct += category['correct']
+        avg_accuracy_no_cat5 = (
+            non_cat5_correct / non_cat5_total * 100 if non_cat5_total else 0
+        )
 
         print("Per-Sample Breakdown:")
         for r in all_sample_results:
             print(f"  Sample {r['sample_id']}: Acc={r['accuracy']:.1f}%, F1={r['avg_f1']:.1f}%, BLEU-1={r['avg_bleu1']:.1f}%, LLM={r['avg_llm']:.1f}%")
 
-        print(f"\nAggregated Metrics (Average across all samples):")
+        print(f"\nAggregated Metrics (Weighted across all questions):")
         print(f"  Average Accuracy: {avg_accuracy:.1f}%")
         print(f"  Average F1: {avg_f1_overall:.1f}%")
         print(f"  Average BLEU-1: {avg_bleu1_overall:.1f}%")
@@ -870,7 +951,7 @@ def main():
 
         # Aggregate category breakdown across all samples
         print(f"\n{'-'*70}")
-        print(f"AGGREGATE RESULTS BY CATEGORY (Average across {len(args.sample)} samples):")
+        print(f"AGGREGATE RESULTS BY CATEGORY (Weighted across all questions):")
 
         # Collect all categories across all samples
         all_categories = set()
@@ -882,7 +963,8 @@ def main():
         for cat_key in sorted(all_categories, key=lambda x: int(x.split('_')[1])):
             cat_num = int(cat_key.split('_')[1])
             total_samples_with_cat = 0
-            sum_total = sum_correct = sum_acc = sum_f1 = sum_bleu = sum_llm = 0
+            sum_total = sum_correct = 0
+            sum_f1 = sum_bleu = sum_llm = 0.0
 
             for r in all_sample_results:
                 if cat_key in r['category_breakdown']:
@@ -890,19 +972,18 @@ def main():
                     total_samples_with_cat += 1
                     sum_total += cat_data['total']
                     sum_correct += cat_data['correct']
-                    sum_acc += cat_data['accuracy']
-                    sum_f1 += cat_data['avg_f1']
-                    sum_bleu += cat_data['avg_bleu1']
-                    sum_llm += cat_data['avg_llm']
+                    sum_f1 += cat_data['avg_f1'] * cat_data['total']
+                    sum_bleu += cat_data['avg_bleu1'] * cat_data['total']
+                    sum_llm += cat_data['avg_llm'] * cat_data['total']
 
             if total_samples_with_cat > 0:
                 aggregate_category_stats[cat_num] = {
                     'avg_total': sum_total / total_samples_with_cat,
                     'avg_correct': sum_correct / total_samples_with_cat,
-                    'avg_accuracy': sum_acc / total_samples_with_cat,
-                    'avg_f1': sum_f1 / total_samples_with_cat,
-                    'avg_bleu1': sum_bleu / total_samples_with_cat,
-                    'avg_llm': sum_llm / total_samples_with_cat,
+                    'avg_accuracy': sum_correct / sum_total * 100 if sum_total else 0,
+                    'avg_f1': sum_f1 / sum_total if sum_total else 0,
+                    'avg_bleu1': sum_bleu / sum_total if sum_total else 0,
+                    'avg_llm': sum_llm / sum_total if sum_total else 0,
                     'samples_count': total_samples_with_cat
                 }
 

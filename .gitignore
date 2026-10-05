@@ -14,7 +14,7 @@ ENV/
 # Cache and data
 cache/
 locomo_trg_cache*/
-locomo_relation_experiment*/
+locomo_relation*/
 longmem_*_cache/
 *.cache
 *.pkl
@@ -27,7 +27,8 @@ longmem_*_cache/
 
 # Results and logs
 results/
-results_relation*/
+results_*/
+logs/
 *.log
 fixed_results_*.json
 rescored_results_*.json

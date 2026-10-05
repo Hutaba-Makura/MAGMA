@@ -2,8 +2,7 @@
 set -Eeuo pipefail
 
 # Launch a detached tmux job that serves Qwen3-14B-AWQ locally and evaluates
-# the same 50 balanced LoCoMo questions (all five categories) with all three
-# relation strategies.
+# the same reproducible 300-question stratified LoCoMo subset.
 
 script_path="$(readlink -f "${BASH_SOURCE[0]}")"
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,8 +14,9 @@ max_model_len="${MAX_MODEL_LEN:-8192}"
 gpu_memory_utilization="${GPU_MEMORY_UTILIZATION:-0.90}"
 client_python="${CLIENT_PYTHON:-/data/student/k2312068/.conda/envs/magma/bin/python}"
 vllm_bin="${VLLM_BIN:-/data/student/k2312068/.conda/envs/gmemory-vllm/bin/vllm}"
+embedding_device="${EMBEDDING_DEVICE:-cpu}"
 cache_dir="${CACHE_DIR:-${repo_dir}/locomo_relation_experiment_qwen3_14b}"
-results_dir="${RESULTS_DIR:-${repo_dir}/results_relation_qwen3_14b}"
+results_dir="${RESULTS_DIR:-${repo_dir}/results_relation_qwen3_14b_full300}"
 log_dir="${LOG_DIR:-${repo_dir}/logs/qwen3_14b_locomo50}"
 
 # Cluster login environments commonly define HTTP(S) proxies. All vLLM
@@ -34,7 +34,8 @@ Usage:
 
 Optional environment variables:
   TMUX_SESSION, QWEN_MODEL, VLLM_PORT, GPU_IDS, MAX_MODEL_LEN,
-  GPU_MEMORY_UTILIZATION, CLIENT_PYTHON, VLLM_BIN, CACHE_DIR, RESULTS_DIR
+  GPU_MEMORY_UTILIZATION, CLIENT_PYTHON, VLLM_BIN, EMBEDDING_DEVICE,
+  CACHE_DIR, RESULTS_DIR
 EOF
 }
 
@@ -75,7 +76,7 @@ if [[ "${1:-}" != "--worker" ]]; then
     mkdir -p "${log_dir}"
     run_log="${log_dir}/run_$(date +%Y%m%d_%H%M%S).log"
     tmux new-session -d -s "${session_name}" -c "${repo_dir}" \
-        "exec env RUN_LOG='${run_log}' TMUX_SESSION='${session_name}' QWEN_MODEL='${model}' VLLM_PORT='${port}' GPU_IDS='${gpu_ids}' MAX_MODEL_LEN='${max_model_len}' GPU_MEMORY_UTILIZATION='${gpu_memory_utilization}' CLIENT_PYTHON='${client_python}' VLLM_BIN='${vllm_bin}' CACHE_DIR='${cache_dir}' RESULTS_DIR='${results_dir}' LOG_DIR='${log_dir}' bash '${script_path}' --worker"
+        "exec env RUN_LOG='${run_log}' TMUX_SESSION='${session_name}' QWEN_MODEL='${model}' VLLM_PORT='${port}' GPU_IDS='${gpu_ids}' MAX_MODEL_LEN='${max_model_len}' GPU_MEMORY_UTILIZATION='${gpu_memory_utilization}' CLIENT_PYTHON='${client_python}' VLLM_BIN='${vllm_bin}' EMBEDDING_DEVICE='${embedding_device}' CACHE_DIR='${cache_dir}' RESULTS_DIR='${results_dir}' LOG_DIR='${log_dir}' bash '${script_path}' --worker"
 
     echo "Started detached tmux session: ${session_name}"
     echo "Model: ${model}"
@@ -192,9 +193,11 @@ echo "vLLM is ready."
 
 common_args=(
     --dataset "${repo_dir}/data/locomo10.json"
-    --sample 0
-    --max-questions 50
+    --sample 0 1 2 3 4 5 6 7 8 9
+    --max-questions 30
     --balanced-categories
+    --sampling-seed 20261001
+    --resume
     --category-to-test 1,2,3,4,5
     --use-episodes
     --model "${model}"
@@ -218,6 +221,7 @@ echo "===== Building three-mode comparison ====="
 "${client_python}" "${repo_dir}/compare_relation_modes.py" \
     --results-dir "${results_dir}" \
     --sample 0 \
-    --output-prefix "${results_dir}/comparison_sample0_50q"
+    --samples 0 1 2 3 4 5 6 7 8 9 \
+    --output-prefix "${results_dir}/comparison_aggregate_samples_0_1_2_3_4_5_6_7_8_9"
 
-echo "All three 50-question LoCoMo runs are complete."
+echo "All three 300-question LoCoMo runs are complete."

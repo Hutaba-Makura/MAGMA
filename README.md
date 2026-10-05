@@ -87,9 +87,10 @@ python test_fixed_memory.py --sample 0 1 2 --max-questions 50
 ### Qwen3-14B three-relation comparison in tmux
 
 The launcher starts a local `Qwen/Qwen3-14B-AWQ` vLLM server and evaluates
-the same 50 balanced questions (10 from each LoCoMo category 1–5, including
-Adversarial) in `original`, `free`, and `hybrid` mode. The detached tmux
-session continues after SSH disconnects.
+the same 300-question stratified subset (30 questions per sample, 6 from each
+LoCoMo category 1–5) in `original`, `free`, and `hybrid` mode. Sampling uses
+a fixed seed so every model and mode receives identical questions. The
+detached tmux session continues after SSH disconnects.
 
 ```bash
 bash scripts/run_locomo_qwen14b_tmux.sh
@@ -97,9 +98,30 @@ bash scripts/run_locomo_qwen14b_tmux.sh status
 tmux attach -t magma-qwen14b-locomo50
 ```
 
-Results are written to `results_relation_qwen3_14b/`; model/cache files are
-kept separate from prior 8B runs. The default GPUs are 2 and 3 and can be
-overridden, for example with `GPU_IDS=4,5`.
+Results are written to `results_relation_qwen3_14b_full300/`; model/cache files
+are kept separate from the 8B run. The default GPUs are 2 and 3.
+
+The matching Qwen3-8B run uses GPUs 4 and 5, with separate tmux, cache, log,
+and result paths:
+
+```bash
+bash scripts/run_locomo_qwen8b_tmux.sh
+bash scripts/run_locomo_qwen8b_tmux.sh status
+tmux attach -t magma-qwen8b-locomo300
+```
+
+Its results are written to `results_relation_qwen3_8b_full300/`.
+
+The same 300-question benchmark can also be run with Llama-3.2-3B on GPUs 6
+and 7:
+
+```bash
+bash scripts/run_locomo_llama3b_tmux.sh
+bash scripts/run_locomo_llama3b_tmux.sh status
+tmux attach -t magma-llama3b-locomo300
+```
+
+Its results are written to `results_relation_llama3b_full300/`.
 
 ### Testing with LongMemEval Dataset
 
